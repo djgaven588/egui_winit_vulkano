@@ -17,8 +17,8 @@ use vulkano::{
         Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer,
     },
     command_buffer::{
-        allocator::StandardCommandBufferAllocator, BufferImageCopy, CopyBufferToImageInfo,
-        RecordingCommandBuffer,
+        allocator::StandardCommandBufferAllocator, BufferImageCopy, CommandBufferBeginInfo,
+        CommandBufferLevel, CommandBufferUsage, CopyBufferToImageInfo, RecordingCommandBuffer,
     },
     descriptor_set::{
         allocator::StandardDescriptorSetAllocator, layout::DescriptorSetLayout, DescriptorSet,
@@ -58,8 +58,11 @@ use vulkano::{
         DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
         PipelineShaderStageCreateInfo,
     },
-    sync::{AccessFlags, DependencyInfo, ImageMemoryBarrier, PipelineStages},
-    DeviceSize, NonZeroDeviceSize,
+    sync::{
+        fence::{Fence, FenceCreateInfo},
+        AccessFlags, DependencyInfo, ImageMemoryBarrier, PipelineStages,
+    },
+    DeviceSize, NonZeroDeviceSize, VulkanObject,
 };
 
 use crate::utils::Allocators;
@@ -336,8 +339,18 @@ impl Renderer {
         delta: &egui::epaint::ImageDelta,
         stage: Subbuffer<[u8]>,
         mapped_stage: &mut [u8],
-        cbb: &mut RecordingCommandBuffer,
     ) {
+        let mut upload_command = RecordingCommandBuffer::new(
+            self.allocators.command_buffer.clone(),
+            self.gfx_queue.queue_family_index(),
+            CommandBufferLevel::Primary,
+            CommandBufferBeginInfo {
+                usage: CommandBufferUsage::OneTimeSubmit,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
         // Extract pixel data from egui, writing into our region of the stage buffer.
         let format = match &delta.image {
             egui::ImageData::Color(image) => {
@@ -369,63 +382,70 @@ impl Renderer {
             // Defer upload of data
             unsafe {
                 // Prepare for transfer
-                cbb.pipeline_barrier(&DependencyInfo {
-                    image_memory_barriers: vec![ImageMemoryBarrier {
-                        src_stages: PipelineStages::ALL_COMMANDS,
-                        dst_stages: PipelineStages::ALL_COMMANDS,
-                        dst_access: AccessFlags::TRANSFER_WRITE,
-                        old_layout: ImageLayout::Undefined,
-                        new_layout: ImageLayout::TransferDstOptimal,
-                        subresource_range: ImageSubresourceRange {
-                            aspects: ImageAspects::COLOR,
-                            mip_levels: 0..1,
-                            array_layers: 0..1,
-                        },
-                        ..ImageMemoryBarrier::image(existing_image.image().clone())
-                    }]
-                    .into(),
-                    ..Default::default()
-                })
-                .unwrap();
-
-                cbb.copy_buffer_to_image(&CopyBufferToImageInfo {
-                    regions: [BufferImageCopy {
-                        // Buffer offsets are derived
-                        image_offset: [pos[0] as u32, pos[1] as u32, 0],
-                        image_extent: [delta.image.width() as u32, delta.image.height() as u32, 1],
-                        // Always use the whole image (no arrays or mips are performed)
-                        image_subresource: ImageSubresourceLayers {
-                            aspects: ImageAspects::COLOR,
-                            mip_level: 0,
-                            array_layers: 0..1,
-                        },
+                upload_command
+                    .pipeline_barrier(&DependencyInfo {
+                        image_memory_barriers: vec![ImageMemoryBarrier {
+                            src_stages: PipelineStages::ALL_COMMANDS,
+                            dst_stages: PipelineStages::ALL_COMMANDS,
+                            dst_access: AccessFlags::TRANSFER_WRITE,
+                            old_layout: ImageLayout::Undefined,
+                            new_layout: ImageLayout::TransferDstOptimal,
+                            subresource_range: ImageSubresourceRange {
+                                aspects: ImageAspects::COLOR,
+                                mip_levels: 0..1,
+                                array_layers: 0..1,
+                            },
+                            ..ImageMemoryBarrier::image(existing_image.image().clone())
+                        }]
+                        .into(),
                         ..Default::default()
-                    }]
-                    .into(),
-                    ..CopyBufferToImageInfo::buffer_image(stage, existing_image.image().clone())
-                })
-                .unwrap();
+                    })
+                    .unwrap();
+
+                upload_command
+                    .copy_buffer_to_image(&CopyBufferToImageInfo {
+                        regions: [BufferImageCopy {
+                            // Buffer offsets are derived
+                            image_offset: [pos[0] as u32, pos[1] as u32, 0],
+                            image_extent: [
+                                delta.image.width() as u32,
+                                delta.image.height() as u32,
+                                1,
+                            ],
+                            // Always use the whole image (no arrays or mips are performed)
+                            image_subresource: ImageSubresourceLayers {
+                                aspects: ImageAspects::COLOR,
+                                mip_level: 0,
+                                array_layers: 0..1,
+                            },
+                            ..Default::default()
+                        }]
+                        .into(),
+                        ..CopyBufferToImageInfo::buffer_image(stage, existing_image.image().clone())
+                    })
+                    .unwrap();
 
                 // Finalize
-                cbb.pipeline_barrier(&DependencyInfo {
-                    image_memory_barriers: vec![ImageMemoryBarrier {
-                        src_stages: PipelineStages::ALL_COMMANDS,
-                        src_access: AccessFlags::TRANSFER_WRITE,
-                        dst_stages: PipelineStages::ALL_COMMANDS,
-                        dst_access: AccessFlags::SHADER_READ,
-                        old_layout: ImageLayout::TransferDstOptimal,
-                        new_layout: ImageLayout::ShaderReadOnlyOptimal,
-                        subresource_range: ImageSubresourceRange {
-                            aspects: ImageAspects::COLOR,
-                            mip_levels: 0..existing_image.image().mip_levels(),
-                            array_layers: 0..existing_image.image().array_layers(),
-                        },
-                        ..ImageMemoryBarrier::image(existing_image.image().clone())
-                    }]
-                    .into(),
-                    ..Default::default()
-                })
-                .unwrap();
+                upload_command
+                    .pipeline_barrier(&DependencyInfo {
+                        image_memory_barriers: vec![ImageMemoryBarrier {
+                            src_stages: PipelineStages::ALL_COMMANDS,
+                            src_access: AccessFlags::TRANSFER_WRITE,
+                            dst_stages: PipelineStages::ALL_COMMANDS,
+                            dst_access: AccessFlags::SHADER_READ,
+                            old_layout: ImageLayout::TransferDstOptimal,
+                            new_layout: ImageLayout::ShaderReadOnlyOptimal,
+                            subresource_range: ImageSubresourceRange {
+                                aspects: ImageAspects::COLOR,
+                                mip_levels: 0..existing_image.image().mip_levels(),
+                                array_layers: 0..existing_image.image().array_layers(),
+                            },
+                            ..ImageMemoryBarrier::image(existing_image.image().clone())
+                        }]
+                        .into(),
+                        ..Default::default()
+                    })
+                    .unwrap();
             }
         } else {
             // Otherwise save the newly created image
@@ -449,48 +469,51 @@ impl Renderer {
             // Defer upload of data
             unsafe {
                 // Prepare for transfer
-                cbb.pipeline_barrier(&DependencyInfo {
-                    image_memory_barriers: vec![ImageMemoryBarrier {
-                        src_stages: PipelineStages::ALL_COMMANDS,
-                        dst_stages: PipelineStages::ALL_COMMANDS,
-                        dst_access: AccessFlags::TRANSFER_WRITE,
-                        old_layout: ImageLayout::Undefined,
-                        new_layout: ImageLayout::TransferDstOptimal,
-                        subresource_range: ImageSubresourceRange {
-                            aspects: ImageAspects::COLOR,
-                            mip_levels: 0..1,
-                            array_layers: 0..1,
-                        },
-                        ..ImageMemoryBarrier::image(img.clone())
-                    }]
-                    .into(),
-                    ..Default::default()
-                })
-                .unwrap();
+                upload_command
+                    .pipeline_barrier(&DependencyInfo {
+                        image_memory_barriers: vec![ImageMemoryBarrier {
+                            src_stages: PipelineStages::ALL_COMMANDS,
+                            dst_stages: PipelineStages::ALL_COMMANDS,
+                            dst_access: AccessFlags::TRANSFER_WRITE,
+                            old_layout: ImageLayout::Undefined,
+                            new_layout: ImageLayout::TransferDstOptimal,
+                            subresource_range: ImageSubresourceRange {
+                                aspects: ImageAspects::COLOR,
+                                mip_levels: 0..1,
+                                array_layers: 0..1,
+                            },
+                            ..ImageMemoryBarrier::image(img.clone())
+                        }]
+                        .into(),
+                        ..Default::default()
+                    })
+                    .unwrap();
 
-                cbb.copy_buffer_to_image(&CopyBufferToImageInfo::buffer_image(stage, img.clone()))
+                upload_command
+                    .copy_buffer_to_image(&CopyBufferToImageInfo::buffer_image(stage, img.clone()))
                     .unwrap();
 
                 // Finalize
-                cbb.pipeline_barrier(&DependencyInfo {
-                    image_memory_barriers: vec![ImageMemoryBarrier {
-                        src_stages: PipelineStages::ALL_COMMANDS,
-                        src_access: AccessFlags::TRANSFER_WRITE,
-                        dst_stages: PipelineStages::ALL_COMMANDS,
-                        dst_access: AccessFlags::SHADER_READ,
-                        old_layout: ImageLayout::TransferDstOptimal,
-                        new_layout: ImageLayout::ShaderReadOnlyOptimal,
-                        subresource_range: ImageSubresourceRange {
-                            aspects: ImageAspects::COLOR,
-                            mip_levels: 0..img.mip_levels(),
-                            array_layers: 0..img.array_layers(),
-                        },
-                        ..ImageMemoryBarrier::image(img.clone())
-                    }]
-                    .into(),
-                    ..Default::default()
-                })
-                .unwrap();
+                upload_command
+                    .pipeline_barrier(&DependencyInfo {
+                        image_memory_barriers: vec![ImageMemoryBarrier {
+                            src_stages: PipelineStages::ALL_COMMANDS,
+                            src_access: AccessFlags::TRANSFER_WRITE,
+                            dst_stages: PipelineStages::ALL_COMMANDS,
+                            dst_access: AccessFlags::SHADER_READ,
+                            old_layout: ImageLayout::TransferDstOptimal,
+                            new_layout: ImageLayout::ShaderReadOnlyOptimal,
+                            subresource_range: ImageSubresourceRange {
+                                aspects: ImageAspects::COLOR,
+                                mip_levels: 0..img.mip_levels(),
+                                array_layers: 0..img.array_layers(),
+                            },
+                            ..ImageMemoryBarrier::image(img.clone())
+                        }]
+                        .into(),
+                        ..Default::default()
+                    })
+                    .unwrap();
             }
 
             // Swizzle packed font images up to a full premul white.
@@ -516,14 +539,40 @@ impl Renderer {
             self.texture_desc_sets.insert(id, desc_set);
             self.texture_images.insert(id, view);
         };
+
+        // Prepare command
+        let command_buffer = unsafe { upload_command.end().unwrap() };
+        let command_buffer_handle = vec![command_buffer.handle()];
+
+        let mut submit_info = ash::vk::SubmitInfo::default()
+            .command_buffers(&command_buffer_handle)
+            .wait_dst_stage_mask(&[ash::vk::PipelineStageFlags::ALL_COMMANDS]);
+        // Dafuq Ash doing?
+        submit_info.wait_semaphore_count = 0;
+
+        let fence =
+            Fence::new(self.gfx_queue.device().clone(), FenceCreateInfo::default()).unwrap();
+
+        // Execute
+        self.gfx_queue.with(|mut _guard| unsafe {
+            (self.gfx_queue.device().fns().v1_0.queue_submit)(
+                self.gfx_queue.handle(),
+                1,
+                &raw const submit_info,
+                fence.handle(),
+            )
+            .result()
+            .unwrap();
+        });
+
+        // Wait for completion
+        fence.wait(None).unwrap();
+
+        drop(command_buffer);
     }
 
     /// Write the entire texture delta for this frame.
-    fn update_textures(
-        &mut self,
-        builder: &mut RecordingCommandBuffer,
-        sets: &[(egui::TextureId, egui::epaint::ImageDelta)],
-    ) {
+    fn update_textures(&mut self, sets: &[(egui::TextureId, egui::epaint::ImageDelta)]) {
         // Allocate enough memory to upload every delta at once.
         let total_size_bytes =
             sets.iter().map(|(_, set)| self.image_size_bytes(set)).sum::<usize>() * 4;
@@ -566,7 +615,7 @@ impl Renderer {
                 let stage = buffer.clone().slice(range.start as u64..range.end as u64);
                 let mapped_stage = &mut writer[range];
 
-                self.update_texture_within(*id, delta, stage, mapped_stage, builder);
+                self.update_texture_within(*id, delta, stage, mapped_stage);
             }
         }
     }
@@ -603,7 +652,7 @@ impl Renderer {
         framebuffer_dimensions: [u32; 2],
         builder: &mut RecordingCommandBuffer,
     ) {
-        self.update_textures(builder, &textures_delta.set);
+        self.update_textures(&textures_delta.set);
         self.draw_egui(scale_factor, clipped_meshes, framebuffer_dimensions, builder);
 
         for &id in &textures_delta.free {

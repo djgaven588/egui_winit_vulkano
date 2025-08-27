@@ -24,7 +24,8 @@ egui-winit = { version = "0.31", default-features = false }
 egui = "0.31"
 image = { version = "0.25", optional = true }
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
-vulkano = { version = "0.35" }
+vulkano = "0.35.2"
+ash = "0.38.0"
 vulkano-shaders = "0.35"
 
 [dev-dependencies]

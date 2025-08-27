@@ -607,6 +607,7 @@ name = "egui_winit_vulkano"
 version = "0.28.0"
 dependencies = [
  "ahash",
+ "ash",
  "cgmath",
  "egui",
  "egui-winit",
@@ -2458,9 +2459,9 @@ dependencies = [
 
 [[package]]
 name = "vulkano"
-version = "0.35.0"
+version = "0.35.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4403d52f9284e3e74b99ec9000bd99cbb8a3d0b98a0125fc840df2cb23dbfd20"
+checksum = "ee487adf7c13e5aa46d4d7fac6ffb8e172eb7e6472aaf815e9ade4992f8f2414"
 dependencies = [
  "ash",
  "bytemuck",
