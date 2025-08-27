@@ -11,7 +11,7 @@ use std::sync::Arc;
 use egui::{ClippedPrimitive, TexturesDelta};
 use egui_winit::winit::event_loop::ActiveEventLoop;
 use vulkano::{
-    command_buffer::SecondaryAutoCommandBuffer,
+    command_buffer::{RecordingCommandBuffer, SecondaryAutoCommandBuffer},
     device::Queue,
     format::{Format, NumericFormat},
     image::{sampler::SamplerCreateInfo, view::ImageView, SampleCount},
@@ -183,43 +183,14 @@ impl Gui {
         self.egui_ctx.begin_pass(raw_input);
     }
 
-    /// Renders ui on `final_image` & Updates cursor icon
-    /// Finishes Egui frame
-    /// - `before_future` = Vulkano's GpuFuture
-    /// - `final_image` = Vulkano's image (render target)
-    pub fn draw_on_image<F>(
-        &mut self,
-        before_future: F,
-        final_image: Arc<ImageView>,
-    ) -> Box<dyn GpuFuture>
-    where
-        F: GpuFuture + 'static,
-    {
-        if !self.renderer.has_renderpass() {
-            panic!(
-                "Gui integration has been created with subpass, use `draw_on_subpass_image` \
-                 instead"
-            )
-        }
-
-        let (clipped_meshes, textures_delta) = self.extract_draw_data_at_frame_end();
-
-        self.renderer.draw_on_image(
-            &clipped_meshes,
-            &textures_delta,
-            self.pixels_per_point(),
-            before_future,
-            final_image,
-        )
-    }
-
     /// Creates commands for rendering ui on subpass' image and returns the command buffer for execution on your side
     /// - Finishes Egui frame
     /// - You must execute the secondary command buffer yourself
     pub fn draw_on_subpass_image(
         &mut self,
+        builder: &mut RecordingCommandBuffer,
         image_dimensions: [u32; 2],
-    ) -> Arc<SecondaryAutoCommandBuffer> {
+    ) {
         if self.renderer.has_renderpass() {
             panic!(
                 "Gui integration has been created with its own render pass, use `draw_on_image` \
@@ -234,7 +205,8 @@ impl Gui {
             &textures_delta,
             self.pixels_per_point(),
             image_dimensions,
-        )
+            builder,
+        );
     }
 
     fn extract_draw_data_at_frame_end(&mut self) -> (Vec<ClippedPrimitive>, TexturesDelta) {

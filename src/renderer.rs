@@ -18,8 +18,9 @@ use vulkano::{
     },
     command_buffer::{
         allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, BufferImageCopy,
-        CommandBufferInheritanceInfo, CommandBufferUsage, CopyBufferToImageInfo,
-        PrimaryAutoCommandBuffer, PrimaryCommandBufferAbstract, RenderPassBeginInfo,
+        CommandBufferBeginInfo, CommandBufferInheritanceInfo, CommandBufferLevel,
+        CommandBufferUsage, CopyBufferToImageInfo, PrimaryAutoCommandBuffer,
+        PrimaryCommandBufferAbstract, RecordingCommandBuffer, RenderPassBeginInfo,
         SecondaryAutoCommandBuffer, SubpassBeginInfo, SubpassContents,
     },
     descriptor_set::{
@@ -34,8 +35,8 @@ use vulkano::{
             SamplerCreateInfo, SamplerMipmapMode,
         },
         view::{ImageView, ImageViewCreateInfo},
-        Image, ImageAspects, ImageCreateInfo, ImageLayout, ImageSubresourceLayers, ImageType,
-        ImageUsage, SampleCount,
+        Image, ImageAspects, ImageCreateInfo, ImageLayout, ImageSubresourceLayers,
+        ImageSubresourceRange, ImageType, ImageUsage, SampleCount,
     },
     memory::{
         allocator::{
@@ -52,7 +53,7 @@ use vulkano::{
             input_assembly::InputAssemblyState,
             multisample::MultisampleState,
             rasterization::RasterizationState,
-            vertex_input::{Vertex, VertexDefinition},
+            vertex_input::{Vertex, VertexBuffersCollection, VertexDefinition},
             viewport::{Scissor, Viewport, ViewportState},
             GraphicsPipelineCreateInfo,
         },
@@ -61,7 +62,7 @@ use vulkano::{
         PipelineShaderStageCreateInfo,
     },
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
-    sync::GpuFuture,
+    sync::{AccessFlags, DependencyInfo, GpuFuture, ImageMemoryBarrier, PipelineStages},
     DeviceSize, NonZeroDeviceSize,
 };
 
@@ -174,22 +175,27 @@ impl Renderer {
             // final_output_format.type_color().unwrap() == NumericType::SRGB;
             final_output_format.numeric_format_color().unwrap() == NumericFormat::SRGB;
         let allocators = Allocators::new_default(gfx_queue.device());
-        let vertex_index_buffer_pool =
-            SubbufferAllocator::new(allocators.memory.clone(), SubbufferAllocatorCreateInfo {
+        let vertex_index_buffer_pool = SubbufferAllocator::new(
+            allocators.memory.clone(),
+            SubbufferAllocatorCreateInfo {
                 arena_size: INDEX_BUFFER_SIZE + VERTEX_BUFFER_SIZE,
                 buffer_usage: BufferUsage::INDEX_BUFFER | BufferUsage::VERTEX_BUFFER,
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
-            });
+            },
+        );
         let pipeline = Self::create_pipeline(gfx_queue.clone(), subpass.clone());
-        let font_sampler = Sampler::new(gfx_queue.device().clone(), SamplerCreateInfo {
-            mag_filter: Filter::Linear,
-            min_filter: Filter::Linear,
-            address_mode: [SamplerAddressMode::ClampToEdge; 3],
-            mipmap_mode: SamplerMipmapMode::Linear,
-            ..Default::default()
-        })
+        let font_sampler = Sampler::new(
+            gfx_queue.device().clone(),
+            SamplerCreateInfo {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: [SamplerAddressMode::ClampToEdge; 3],
+                mipmap_mode: SamplerMipmapMode::Linear,
+                ..Default::default()
+            },
+        )
         .unwrap();
         let font_format = Self::choose_font_format(gfx_queue.device());
         Renderer {
@@ -268,22 +274,28 @@ impl Renderer {
         )
         .unwrap();
 
-        GraphicsPipeline::new(gfx_queue.device().clone(), None, GraphicsPipelineCreateInfo {
-            stages: stages.into_iter().collect(),
-            vertex_input_state,
-            input_assembly_state: Some(InputAssemblyState::default()),
-            viewport_state: Some(ViewportState::default()),
-            rasterization_state: Some(RasterizationState::default()),
-            multisample_state: Some(MultisampleState {
-                rasterization_samples: subpass.num_samples().unwrap_or(SampleCount::Sample1),
-                ..Default::default()
-            }),
-            color_blend_state: Some(blend_state),
-            depth_stencil_state,
-            dynamic_state: [DynamicState::Viewport, DynamicState::Scissor].into_iter().collect(),
-            subpass: Some(subpass.into()),
-            ..GraphicsPipelineCreateInfo::layout(layout)
-        })
+        GraphicsPipeline::new(
+            gfx_queue.device().clone(),
+            None,
+            GraphicsPipelineCreateInfo {
+                stages: stages.into_iter().collect(),
+                vertex_input_state,
+                input_assembly_state: Some(InputAssemblyState::default()),
+                viewport_state: Some(ViewportState::default()),
+                rasterization_state: Some(RasterizationState::default()),
+                multisample_state: Some(MultisampleState {
+                    rasterization_samples: subpass.num_samples().unwrap_or(SampleCount::Sample1),
+                    ..Default::default()
+                }),
+                color_blend_state: Some(blend_state),
+                depth_stencil_state,
+                dynamic_state: [DynamicState::Viewport, DynamicState::Scissor]
+                    .into_iter()
+                    .collect(),
+                subpass: Some(subpass.into()),
+                ..GraphicsPipelineCreateInfo::layout(layout)
+            },
+        )
         .unwrap()
     }
 
@@ -402,7 +414,7 @@ impl Renderer {
         delta: &egui::epaint::ImageDelta,
         stage: Subbuffer<[u8]>,
         mapped_stage: &mut [u8],
-        cbb: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        cbb: &mut RecordingCommandBuffer,
     ) {
         // Extract pixel data from egui, writing into our region of the stage buffer.
         let format = match &delta.image {
@@ -433,23 +445,66 @@ impl Renderer {
             assert_eq!(existing_image.format(), format);
 
             // Defer upload of data
-            cbb.copy_buffer_to_image(CopyBufferToImageInfo {
-                regions: [BufferImageCopy {
-                    // Buffer offsets are derived
-                    image_offset: [pos[0] as u32, pos[1] as u32, 0],
-                    image_extent: [delta.image.width() as u32, delta.image.height() as u32, 1],
-                    // Always use the whole image (no arrays or mips are performed)
-                    image_subresource: ImageSubresourceLayers {
-                        aspects: ImageAspects::COLOR,
-                        mip_level: 0,
-                        array_layers: 0..1,
-                    },
+            unsafe {
+                // Prepare for transfer
+                cbb.pipeline_barrier(&DependencyInfo {
+                    image_memory_barriers: vec![ImageMemoryBarrier {
+                        src_stages: PipelineStages::ALL_COMMANDS,
+                        dst_stages: PipelineStages::ALL_COMMANDS,
+                        dst_access: AccessFlags::TRANSFER_WRITE,
+                        old_layout: ImageLayout::Undefined,
+                        new_layout: ImageLayout::TransferDstOptimal,
+                        subresource_range: ImageSubresourceRange {
+                            aspects: ImageAspects::COLOR,
+                            mip_levels: 0..1,
+                            array_layers: 0..1,
+                        },
+                        ..ImageMemoryBarrier::image(existing_image.image().clone())
+                    }]
+                    .into(),
                     ..Default::default()
-                }]
-                .into(),
-                ..CopyBufferToImageInfo::buffer_image(stage, existing_image.image().clone())
-            })
-            .unwrap();
+                })
+                .unwrap();
+
+                cbb.copy_buffer_to_image(&CopyBufferToImageInfo {
+                    regions: [BufferImageCopy {
+                        // Buffer offsets are derived
+                        image_offset: [pos[0] as u32, pos[1] as u32, 0],
+                        image_extent: [delta.image.width() as u32, delta.image.height() as u32, 1],
+                        // Always use the whole image (no arrays or mips are performed)
+                        image_subresource: ImageSubresourceLayers {
+                            aspects: ImageAspects::COLOR,
+                            mip_level: 0,
+                            array_layers: 0..1,
+                        },
+                        ..Default::default()
+                    }]
+                    .into(),
+                    ..CopyBufferToImageInfo::buffer_image(stage, existing_image.image().clone())
+                })
+                .unwrap();
+
+                // Finalize
+                cbb.pipeline_barrier(&DependencyInfo {
+                    image_memory_barriers: vec![ImageMemoryBarrier {
+                        src_stages: PipelineStages::ALL_COMMANDS,
+                        src_access: AccessFlags::TRANSFER_WRITE,
+                        dst_stages: PipelineStages::ALL_COMMANDS,
+                        dst_access: AccessFlags::SHADER_READ,
+                        old_layout: ImageLayout::TransferDstOptimal,
+                        new_layout: ImageLayout::ShaderReadOnlyOptimal,
+                        subresource_range: ImageSubresourceRange {
+                            aspects: ImageAspects::COLOR,
+                            mip_levels: 0..existing_image.image().mip_levels(),
+                            array_layers: 0..existing_image.image().array_layers(),
+                        },
+                        ..ImageMemoryBarrier::image(existing_image.image().clone())
+                    }]
+                    .into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            }
         } else {
             // Otherwise save the newly created image
             let img = {
@@ -468,9 +523,54 @@ impl Renderer {
                 )
                 .unwrap()
             };
+
             // Defer upload of data
-            cbb.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(stage, img.clone()))
+            unsafe {
+                // Prepare for transfer
+                cbb.pipeline_barrier(&DependencyInfo {
+                    image_memory_barriers: vec![ImageMemoryBarrier {
+                        src_stages: PipelineStages::ALL_COMMANDS,
+                        dst_stages: PipelineStages::ALL_COMMANDS,
+                        dst_access: AccessFlags::TRANSFER_WRITE,
+                        old_layout: ImageLayout::Undefined,
+                        new_layout: ImageLayout::TransferDstOptimal,
+                        subresource_range: ImageSubresourceRange {
+                            aspects: ImageAspects::COLOR,
+                            mip_levels: 0..1,
+                            array_layers: 0..1,
+                        },
+                        ..ImageMemoryBarrier::image(img.clone())
+                    }]
+                    .into(),
+                    ..Default::default()
+                })
                 .unwrap();
+
+                cbb.copy_buffer_to_image(&CopyBufferToImageInfo::buffer_image(stage, img.clone()))
+                    .unwrap();
+
+                // Finalize
+                cbb.pipeline_barrier(&DependencyInfo {
+                    image_memory_barriers: vec![ImageMemoryBarrier {
+                        src_stages: PipelineStages::ALL_COMMANDS,
+                        src_access: AccessFlags::TRANSFER_WRITE,
+                        dst_stages: PipelineStages::ALL_COMMANDS,
+                        dst_access: AccessFlags::SHADER_READ,
+                        old_layout: ImageLayout::TransferDstOptimal,
+                        new_layout: ImageLayout::ShaderReadOnlyOptimal,
+                        subresource_range: ImageSubresourceRange {
+                            aspects: ImageAspects::COLOR,
+                            mip_levels: 0..img.mip_levels(),
+                            array_layers: 0..img.array_layers(),
+                        },
+                        ..ImageMemoryBarrier::image(img.clone())
+                    }]
+                    .into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            }
+
             // Swizzle packed font images up to a full premul white.
             let component_mapping = match format {
                 Format::R8G8_UNORM => ComponentMapping {
@@ -481,10 +581,10 @@ impl Renderer {
                 },
                 _ => ComponentMapping::identity(),
             };
-            let view = ImageView::new(img.clone(), ImageViewCreateInfo {
-                component_mapping,
-                ..ImageViewCreateInfo::from_image(&img)
-            })
+            let view = ImageView::new(
+                img.clone(),
+                ImageViewCreateInfo { component_mapping, ..ImageViewCreateInfo::from_image(&img) },
+            )
             .unwrap();
             // Create a descriptor for it
             let layout = self.pipeline.layout().set_layouts().first().unwrap();
@@ -495,8 +595,13 @@ impl Renderer {
             self.texture_images.insert(id, view);
         };
     }
+
     /// Write the entire texture delta for this frame.
-    fn update_textures(&mut self, sets: &[(egui::TextureId, egui::epaint::ImageDelta)]) {
+    fn update_textures(
+        &mut self,
+        builder: &mut RecordingCommandBuffer,
+        sets: &[(egui::TextureId, egui::epaint::ImageDelta)],
+    ) {
         // Allocate enough memory to upload every delta at once.
         let total_size_bytes =
             sets.iter().map(|(_, set)| self.image_size_bytes(set)).sum::<usize>() * 4;
@@ -520,14 +625,6 @@ impl Renderer {
         .unwrap();
         let buffer = Subbuffer::new(buffer);
 
-        // Shared command buffer for every upload in this batch.
-        let mut cbb = AutoCommandBufferBuilder::primary(
-            self.allocators.command_buffer.clone(),
-            self.gfx_queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .unwrap();
-
         {
             // Scoped to keep writer lock bounded
             // Should be infallible - Just made the buffer so it's exclusive, and we have host access to it.
@@ -547,21 +644,9 @@ impl Renderer {
                 let stage = buffer.clone().slice(range.start as u64..range.end as u64);
                 let mapped_stage = &mut writer[range];
 
-                self.update_texture_within(*id, delta, stage, mapped_stage, &mut cbb);
+                self.update_texture_within(*id, delta, stage, mapped_stage, builder);
             }
         }
-
-        // Execute every upload at once and await:
-        let command_buffer = cbb.build().unwrap();
-        // Executing on the graphics queue not only since it's what we have, but
-        // we must guarantee a transfer granularity of [1,1,x] which graphics queue is required to have.
-        command_buffer
-            .execute(self.gfx_queue.clone())
-            .unwrap()
-            .then_signal_fence_and_flush()
-            .unwrap()
-            .wait(None)
-            .unwrap();
     }
 
     fn get_rect_scissor(
@@ -588,122 +673,20 @@ impl Renderer {
         }
     }
 
-    fn create_secondary_command_buffer_builder(
-        &self,
-    ) -> AutoCommandBufferBuilder<SecondaryAutoCommandBuffer> {
-        AutoCommandBufferBuilder::secondary(
-            self.allocators.command_buffer.clone(),
-            self.gfx_queue.queue_family_index(),
-            CommandBufferUsage::MultipleSubmit,
-            CommandBufferInheritanceInfo {
-                render_pass: Some(self.subpass.clone().into()),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-    }
-
-    // Starts the rendering pipeline and returns [`RecordingCommandBuffer`] for drawing
-    fn start(
-        &mut self,
-        final_image: Arc<ImageView>,
-    ) -> (AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>, [u32; 2]) {
-        // Get dimensions
-        let img_dims = final_image.image().extent();
-        // Create framebuffer (must be in same order as render pass description in `new`
-        let framebuffer = Framebuffer::new(
-            self.render_pass
-                .as_ref()
-                .expect(
-                    "No renderpass on this renderer (created with subpass), use 'draw_subpass' \
-                     instead",
-                )
-                .clone(),
-            FramebufferCreateInfo { attachments: vec![final_image], ..Default::default() },
-        )
-        .unwrap();
-        let mut command_buffer_builder = AutoCommandBufferBuilder::primary(
-            self.allocators.command_buffer.clone(),
-            self.gfx_queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )
-        .unwrap();
-        // Add clear values here for attachments and begin render pass
-        command_buffer_builder
-            .begin_render_pass(
-                RenderPassBeginInfo {
-                    clear_values: vec![if !self.is_overlay { Some([0.0; 4].into()) } else { None }],
-                    ..RenderPassBeginInfo::framebuffer(framebuffer)
-                },
-                SubpassBeginInfo {
-                    contents: SubpassContents::SecondaryCommandBuffers,
-                    ..SubpassBeginInfo::default()
-                },
-            )
-            .unwrap();
-        (command_buffer_builder, [img_dims[0], img_dims[1]])
-    }
-
-    /// Executes our draw commands on the final image and returns a `GpuFuture` to wait on
-    pub fn draw_on_image<F>(
-        &mut self,
-        clipped_meshes: &[ClippedPrimitive],
-        textures_delta: &TexturesDelta,
-        scale_factor: f32,
-        before_future: F,
-        final_image: Arc<ImageView>,
-    ) -> Box<dyn GpuFuture>
-    where
-        F: GpuFuture + 'static,
-    {
-        self.update_textures(&textures_delta.set);
-
-        let (mut command_buffer_builder, framebuffer_dimensions) = self.start(final_image);
-        let mut builder = self.create_secondary_command_buffer_builder();
-        self.draw_egui(scale_factor, clipped_meshes, framebuffer_dimensions, &mut builder);
-        // Execute draw commands
-        let command_buffer = builder.build().unwrap();
-        command_buffer_builder.execute_commands(command_buffer).unwrap();
-        let done_future = self.finish(command_buffer_builder, Box::new(before_future));
-
-        for &id in &textures_delta.free {
-            self.unregister_image(id);
-        }
-
-        done_future
-    }
-
-    // Finishes the rendering pipeline
-    fn finish(
-        &self,
-        mut command_buffer_builder: AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-        before_main_cb_future: Box<dyn GpuFuture>,
-    ) -> Box<dyn GpuFuture> {
-        // We end render pass
-        command_buffer_builder.end_render_pass(Default::default()).unwrap();
-        // Then execute our whole command buffer
-        let command_buffer = command_buffer_builder.build().unwrap();
-        let after_main_cb =
-            before_main_cb_future.then_execute(self.gfx_queue.clone(), command_buffer).unwrap();
-        // Return our future
-        Box::new(after_main_cb)
-    }
-
     pub fn draw_on_subpass_image(
         &mut self,
         clipped_meshes: &[ClippedPrimitive],
         textures_delta: &TexturesDelta,
         scale_factor: f32,
         framebuffer_dimensions: [u32; 2],
-    ) -> Arc<SecondaryAutoCommandBuffer> {
-        self.update_textures(&textures_delta.set);
-        let mut builder = self.create_secondary_command_buffer_builder();
-        self.draw_egui(scale_factor, clipped_meshes, framebuffer_dimensions, &mut builder);
-        let buffer = builder.build().unwrap();
+        builder: &mut RecordingCommandBuffer,
+    ) {
+        self.update_textures(builder, &textures_delta.set);
+        self.draw_egui(scale_factor, clipped_meshes, framebuffer_dimensions, builder);
+
         for &id in &textures_delta.free {
             self.unregister_image(id);
         }
-        buffer
     }
     /// Uploads all meshes in bulk. They will be available in the same order, packed.
     /// None if no vertices or no indices.
@@ -785,7 +768,7 @@ impl Renderer {
         scale_factor: f32,
         clipped_meshes: &[ClippedPrimitive],
         framebuffer_dimensions: [u32; 2],
-        builder: &mut AutoCommandBufferBuilder<SecondaryAutoCommandBuffer>,
+        builder: &mut RecordingCommandBuffer,
     ) {
         let push_constants = vs::PushConstants {
             screen_size: [
@@ -831,29 +814,29 @@ impl Renderer {
                             unreachable!()
                         };
 
-                        builder
-                            .bind_pipeline_graphics(self.pipeline.clone())
-                            .unwrap()
-                            .bind_index_buffer(indices)
-                            .unwrap()
-                            .bind_vertex_buffers(0, [vertices])
-                            .unwrap()
-                            .set_viewport(
-                                0,
-                                [Viewport {
-                                    offset: [0.0, 0.0],
-                                    extent: [
-                                        framebuffer_dimensions[0] as f32,
-                                        framebuffer_dimensions[1] as f32,
-                                    ],
-                                    depth_range: 0.0..=1.0,
-                                }]
-                                .into_iter()
-                                .collect(),
-                            )
-                            .unwrap()
-                            .push_constants(self.pipeline.layout().clone(), 0, push_constants)
-                            .unwrap();
+                        unsafe {
+                            builder
+                                .bind_pipeline_graphics(&self.pipeline)
+                                .unwrap()
+                                .bind_index_buffer(&vulkano::buffer::IndexBuffer::U32(indices))
+                                .unwrap()
+                                .bind_vertex_buffers(0, &vertices.into_vec())
+                                .unwrap()
+                                .set_viewport(
+                                    0,
+                                    &[Viewport {
+                                        offset: [0.0, 0.0],
+                                        extent: [
+                                            framebuffer_dimensions[0] as f32,
+                                            framebuffer_dimensions[1] as f32,
+                                        ],
+                                        depth_range: 0.0..=1.0,
+                                    }],
+                                )
+                                .unwrap()
+                                .push_constants(self.pipeline.layout(), 0, &push_constants)
+                                .unwrap()
+                        };
                     }
                     // Find and bind image, if different.
                     if current_texture != Some(mesh.texture_id) {
@@ -865,14 +848,17 @@ impl Renderer {
 
                         let desc_set = self.texture_desc_sets.get(&mesh.texture_id).unwrap();
 
-                        builder
-                            .bind_descriptor_sets(
-                                PipelineBindPoint::Graphics,
-                                self.pipeline.layout().clone(),
-                                0,
-                                desc_set.clone(),
-                            )
-                            .unwrap();
+                        unsafe {
+                            builder
+                                .bind_descriptor_sets(
+                                    PipelineBindPoint::Graphics,
+                                    self.pipeline.layout(),
+                                    0,
+                                    &[desc_set.as_raw()],
+                                    &[],
+                                )
+                                .unwrap()
+                        };
                     };
                     // Calculate and set scissor, if different
                     if current_rect != Some(*clip_rect) {
@@ -880,7 +866,7 @@ impl Renderer {
                         let new_scissor =
                             self.get_rect_scissor(scale_factor, framebuffer_dimensions, *clip_rect);
 
-                        builder.set_scissor(0, [new_scissor].into_iter().collect()).unwrap();
+                        unsafe { builder.set_scissor(0, &[new_scissor]).unwrap() };
                     }
 
                     // All set up to draw!
@@ -921,29 +907,27 @@ impl Renderer {
                         let rect_max_x = rect_max_x.round();
                         let rect_max_y = rect_max_y.round();
 
-                        builder
-                            .set_viewport(
-                                0,
-                                [Viewport {
-                                    offset: [rect_min_x, rect_min_y],
-                                    extent: [rect_max_x - rect_min_x, rect_max_y - rect_min_y],
-                                    depth_range: 0.0..=1.0,
-                                }]
-                                .into_iter()
-                                .collect(),
-                            )
-                            .unwrap()
-                            .set_scissor(
-                                0,
-                                [self.get_rect_scissor(
-                                    scale_factor,
-                                    framebuffer_dimensions,
-                                    *clip_rect,
-                                )]
-                                .into_iter()
-                                .collect(),
-                            )
-                            .unwrap();
+                        unsafe {
+                            builder
+                                .set_viewport(
+                                    0,
+                                    &[Viewport {
+                                        offset: [rect_min_x, rect_min_y],
+                                        extent: [rect_max_x - rect_min_x, rect_max_y - rect_min_y],
+                                        depth_range: 0.0..=1.0,
+                                    }],
+                                )
+                                .unwrap()
+                                .set_scissor(
+                                    0,
+                                    &[self.get_rect_scissor(
+                                        scale_factor,
+                                        framebuffer_dimensions,
+                                        *clip_rect,
+                                    )],
+                                )
+                                .unwrap()
+                        };
 
                         let info = egui::PaintCallbackInfo {
                             viewport: callback.rect,
@@ -951,10 +935,10 @@ impl Renderer {
                             pixels_per_point: scale_factor,
                             screen_size_px: framebuffer_dimensions,
                         };
-                        (callback_fn.f)(info, &mut CallbackContext {
-                            builder,
-                            resources: self.render_resources(),
-                        });
+                        (callback_fn.f)(
+                            info,
+                            &mut CallbackContext { builder, resources: self.render_resources() },
+                        );
 
                         // The user could have done much here - rebind pipes, set views, bind things, etc.
                         // Mark all state as lost so that next mesh rebinds everything to a known state.
@@ -995,7 +979,7 @@ impl Renderer {
 ///
 /// See the `triangle` demo source for a detailed usage example.
 pub struct CallbackContext<'a> {
-    pub builder: &'a mut AutoCommandBufferBuilder<SecondaryAutoCommandBuffer>,
+    pub builder: &'a mut RecordingCommandBuffer,
     pub resources: RenderResources<'a>,
 }
 
