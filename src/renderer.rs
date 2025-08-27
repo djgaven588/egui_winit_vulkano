@@ -17,11 +17,8 @@ use vulkano::{
         Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer,
     },
     command_buffer::{
-        allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, BufferImageCopy,
-        CommandBufferBeginInfo, CommandBufferInheritanceInfo, CommandBufferLevel,
-        CommandBufferUsage, CopyBufferToImageInfo, PrimaryAutoCommandBuffer,
-        PrimaryCommandBufferAbstract, RecordingCommandBuffer, RenderPassBeginInfo,
-        SecondaryAutoCommandBuffer, SubpassBeginInfo, SubpassContents,
+        allocator::StandardCommandBufferAllocator, BufferImageCopy, CopyBufferToImageInfo,
+        RecordingCommandBuffer,
     },
     descriptor_set::{
         allocator::StandardDescriptorSetAllocator, layout::DescriptorSetLayout, DescriptorSet,
@@ -49,7 +46,6 @@ use vulkano::{
             color_blend::{
                 AttachmentBlend, BlendFactor, ColorBlendAttachmentState, ColorBlendState,
             },
-            depth_stencil::{CompareOp, DepthState, DepthStencilState},
             input_assembly::InputAssemblyState,
             multisample::MultisampleState,
             rasterization::RasterizationState,
@@ -61,8 +57,8 @@ use vulkano::{
         DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
         PipelineShaderStageCreateInfo,
     },
-    render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass},
-    sync::{AccessFlags, DependencyInfo, GpuFuture, ImageMemoryBarrier, PipelineStages},
+    render_pass::RenderPass,
+    sync::{AccessFlags, DependencyInfo, ImageMemoryBarrier, PipelineStages},
     DeviceSize, NonZeroDeviceSize,
 };
 
@@ -102,7 +98,6 @@ pub struct Renderer {
     allocators: Allocators,
     vertex_index_buffer_pool: SubbufferAllocator,
     pipeline: Arc<GraphicsPipeline>,
-    subpass: Subpass,
 
     texture_desc_sets: AHashMap<egui::TextureId, Arc<DescriptorSet>>,
     texture_images: AHashMap<egui::TextureId, Arc<ImageView>>,
@@ -110,64 +105,13 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new_with_subpass(
-        gfx_queue: Arc<Queue>,
-        final_output_format: Format,
-        subpass: Subpass,
-    ) -> Renderer {
-        Self::new_internal(gfx_queue, final_output_format, subpass, None, false)
-    }
-
-    /// Creates a new [Renderer] which is responsible for rendering egui with its own renderpass
-    /// See examples
-    pub fn new_with_render_pass(
-        gfx_queue: Arc<Queue>,
-        final_output_format: Format,
-        is_overlay: bool,
-        samples: SampleCount,
-    ) -> Renderer {
-        // Create Gui render pass with just depth and final color
-        let render_pass = if is_overlay {
-            vulkano::single_pass_renderpass!(gfx_queue.device().clone(),
-                attachments: {
-                    final_color: {
-                        format: final_output_format,
-                        samples: samples,
-                        load_op: Load,
-                        store_op: Store,
-                    }
-                },
-                pass: {
-                        color: [final_color],
-                        depth_stencil: {}
-                }
-            )
-            .unwrap()
-        } else {
-            vulkano::single_pass_renderpass!(gfx_queue.device().clone(),
-                attachments: {
-                    final_color: {
-                        format: final_output_format,
-                        samples: samples,
-                        load_op: Clear,
-                        store_op: Store,
-                    }
-                },
-                pass: {
-                        color: [final_color],
-                        depth_stencil: {}
-                }
-            )
-            .unwrap()
-        };
-        let subpass = Subpass::from(render_pass.clone(), 0).unwrap();
-        Self::new_internal(gfx_queue, final_output_format, subpass, Some(render_pass), is_overlay)
+    pub fn new_with_subpass(gfx_queue: Arc<Queue>, final_output_format: Format) -> Renderer {
+        Self::new_internal(gfx_queue, final_output_format, None, false)
     }
 
     fn new_internal(
         gfx_queue: Arc<Queue>,
         final_output_format: Format,
-        subpass: Subpass,
         render_pass: Option<Arc<RenderPass>>,
         is_overlay: bool,
     ) -> Renderer {
@@ -185,7 +129,7 @@ impl Renderer {
                 ..Default::default()
             },
         );
-        let pipeline = Self::create_pipeline(gfx_queue.clone(), subpass.clone());
+        let pipeline = Self::create_pipeline(gfx_queue.clone());
         let font_sampler = Sampler::new(
             gfx_queue.device().clone(),
             SamplerCreateInfo {
@@ -204,7 +148,6 @@ impl Renderer {
             render_pass,
             vertex_index_buffer_pool,
             pipeline,
-            subpass,
             texture_desc_sets: AHashMap::default(),
             texture_images: AHashMap::default(),
             next_native_tex_id: 0,
@@ -220,7 +163,7 @@ impl Renderer {
         self.render_pass.is_some()
     }
 
-    fn create_pipeline(gfx_queue: Arc<Queue>, subpass: Subpass) -> Arc<GraphicsPipeline> {
+    fn create_pipeline(gfx_queue: Arc<Queue>) -> Arc<GraphicsPipeline> {
         let vs = vs::load(gfx_queue.device().clone())
             .expect("failed to create shader module")
             .entry_point("main")
@@ -240,25 +183,6 @@ impl Renderer {
                 ..Default::default()
             }],
             ..ColorBlendState::default()
-        };
-
-        let has_depth_buffer = subpass
-            .subpass_desc()
-            .depth_stencil_attachment
-            .as_ref()
-            .is_some_and(|depth_stencil_attachment| {
-                subpass.render_pass().attachments()[depth_stencil_attachment.attachment as usize]
-                    .format
-                    .aspects()
-                    .intersects(ImageAspects::DEPTH)
-            });
-        let depth_stencil_state = if has_depth_buffer {
-            Some(DepthStencilState {
-                depth: Some(DepthState { write_enable: false, compare_op: CompareOp::Always }),
-                ..Default::default()
-            })
-        } else {
-            None
         };
 
         let vertex_input_state = Some(EguiVertex::per_vertex().definition(&vs).unwrap());
@@ -284,15 +208,14 @@ impl Renderer {
                 viewport_state: Some(ViewportState::default()),
                 rasterization_state: Some(RasterizationState::default()),
                 multisample_state: Some(MultisampleState {
-                    rasterization_samples: subpass.num_samples().unwrap_or(SampleCount::Sample1),
+                    rasterization_samples: SampleCount::Sample1,
                     ..Default::default()
                 }),
                 color_blend_state: Some(blend_state),
-                depth_stencil_state,
+                depth_stencil_state: None,
                 dynamic_state: [DynamicState::Viewport, DynamicState::Scissor]
                     .into_iter()
                     .collect(),
-                subpass: Some(subpass.into()),
                 ..GraphicsPipelineCreateInfo::layout(layout)
             },
         )
@@ -954,7 +877,6 @@ impl Renderer {
     pub fn render_resources(&self) -> RenderResources {
         RenderResources {
             queue: self.queue(),
-            subpass: self.subpass.clone(),
             memory_allocator: self.allocators.memory.clone(),
             descriptor_set_allocator: &self.allocators.descriptor_set,
             command_buffer_allocator: &self.allocators.command_buffer,
@@ -995,7 +917,6 @@ pub struct RenderResources<'a> {
     pub descriptor_set_allocator: &'a StandardDescriptorSetAllocator,
     pub command_buffer_allocator: &'a StandardCommandBufferAllocator,
     pub queue: Arc<Queue>,
-    pub subpass: Subpass,
 }
 
 pub type CallbackFnDef = dyn Fn(PaintCallbackInfo, &mut CallbackContext) + Sync + Send;

@@ -11,13 +11,11 @@ use std::sync::Arc;
 use egui::{ClippedPrimitive, TexturesDelta};
 use egui_winit::winit::event_loop::ActiveEventLoop;
 use vulkano::{
-    command_buffer::{RecordingCommandBuffer, SecondaryAutoCommandBuffer},
+    command_buffer::RecordingCommandBuffer,
     device::Queue,
     format::{Format, NumericFormat},
     image::{sampler::SamplerCreateInfo, view::ImageView, SampleCount},
-    render_pass::Subpass,
     swapchain::Surface,
-    sync::GpuFuture,
 };
 use winit::window::Window;
 
@@ -81,36 +79,16 @@ pub struct Gui {
 impl Gui {
     /// Creates new Egui to Vulkano integration by setting the necessary parameters
     /// This is to be called once we have access to vulkano_win's winit window surface
-    /// and gfx queue. Created with this, the renderer will own a render pass which is useful to e.g. place your render pass' images
-    /// onto egui windows
-    pub fn new(
-        event_loop: &ActiveEventLoop,
-        surface: Arc<Surface>,
-        gfx_queue: Arc<Queue>,
-        output_format: Format,
-        config: GuiConfig,
-    ) -> Gui {
-        config.validate(output_format);
-        let renderer = Renderer::new_with_render_pass(
-            gfx_queue,
-            output_format,
-            config.is_overlay,
-            config.samples,
-        );
-        Self::new_internal(event_loop, surface, renderer)
-    }
-
-    /// Same as `new` but instead of integration owning a render pass, egui renders on your subpass
+    /// and gfx queue. Created with this, the renderer will render on top of the existing image.
     pub fn new_with_subpass(
         event_loop: &ActiveEventLoop,
         surface: Arc<Surface>,
         gfx_queue: Arc<Queue>,
-        subpass: Subpass,
         output_format: Format,
         config: GuiConfig,
     ) -> Gui {
         config.validate(output_format);
-        let renderer = Renderer::new_with_subpass(gfx_queue, output_format, subpass);
+        let renderer = Renderer::new_with_subpass(gfx_queue, output_format);
         Self::new_internal(event_loop, surface, renderer)
     }
 
