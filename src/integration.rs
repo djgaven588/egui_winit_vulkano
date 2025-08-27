@@ -15,6 +15,7 @@ use vulkano::{
     device::Queue,
     format::{Format, NumericFormat},
     image::{sampler::SamplerCreateInfo, view::ImageView, SampleCount},
+    pipeline::graphics::subpass::PipelineSubpassType,
     swapchain::Surface,
 };
 use winit::window::Window;
@@ -85,10 +86,11 @@ impl Gui {
         surface: Arc<Surface>,
         gfx_queue: Arc<Queue>,
         output_format: Format,
+        subpass: PipelineSubpassType,
         config: GuiConfig,
     ) -> Gui {
         config.validate(output_format);
-        let renderer = Renderer::new_with_subpass(gfx_queue, output_format);
+        let renderer = Renderer::new_with_subpass(gfx_queue, subpass, output_format);
         Self::new_internal(event_loop, surface, renderer)
     }
 
@@ -169,13 +171,6 @@ impl Gui {
         builder: &mut RecordingCommandBuffer,
         image_dimensions: [u32; 2],
     ) {
-        if self.renderer.has_renderpass() {
-            panic!(
-                "Gui integration has been created with its own render pass, use `draw_on_image` \
-                 instead"
-            )
-        }
-
         let (clipped_meshes, textures_delta) = self.extract_draw_data_at_frame_end();
 
         self.renderer.draw_on_subpass_image(

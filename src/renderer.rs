@@ -49,6 +49,7 @@ use vulkano::{
             input_assembly::InputAssemblyState,
             multisample::MultisampleState,
             rasterization::RasterizationState,
+            subpass::PipelineSubpassType,
             vertex_input::{Vertex, VertexBuffersCollection, VertexDefinition},
             viewport::{Scissor, Viewport, ViewportState},
             GraphicsPipelineCreateInfo,
@@ -57,7 +58,6 @@ use vulkano::{
         DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
         PipelineShaderStageCreateInfo,
     },
-    render_pass::RenderPass,
     sync::{AccessFlags, DependencyInfo, ImageMemoryBarrier, PipelineStages},
     DeviceSize, NonZeroDeviceSize,
 };
@@ -85,8 +85,6 @@ pub struct EguiVertex {
 
 pub struct Renderer {
     gfx_queue: Arc<Queue>,
-    render_pass: Option<Arc<RenderPass>>,
-    is_overlay: bool,
     output_in_linear_colorspace: bool,
 
     #[allow(unused)]
@@ -105,15 +103,18 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new_with_subpass(gfx_queue: Arc<Queue>, final_output_format: Format) -> Renderer {
-        Self::new_internal(gfx_queue, final_output_format, None, false)
+    pub fn new_with_subpass(
+        gfx_queue: Arc<Queue>,
+        subpass: PipelineSubpassType,
+        final_output_format: Format,
+    ) -> Renderer {
+        Self::new_internal(gfx_queue, final_output_format, subpass)
     }
 
     fn new_internal(
         gfx_queue: Arc<Queue>,
         final_output_format: Format,
-        render_pass: Option<Arc<RenderPass>>,
-        is_overlay: bool,
+        subpass: PipelineSubpassType,
     ) -> Renderer {
         let output_in_linear_colorspace =
             // final_output_format.type_color().unwrap() == NumericType::SRGB;
@@ -129,7 +130,7 @@ impl Renderer {
                 ..Default::default()
             },
         );
-        let pipeline = Self::create_pipeline(gfx_queue.clone());
+        let pipeline = Self::create_pipeline(subpass.clone(), gfx_queue.clone());
         let font_sampler = Sampler::new(
             gfx_queue.device().clone(),
             SamplerCreateInfo {
@@ -145,13 +146,11 @@ impl Renderer {
         Renderer {
             gfx_queue,
             format: final_output_format,
-            render_pass,
             vertex_index_buffer_pool,
             pipeline,
             texture_desc_sets: AHashMap::default(),
             texture_images: AHashMap::default(),
             next_native_tex_id: 0,
-            is_overlay,
             output_in_linear_colorspace,
             font_sampler,
             font_format,
@@ -159,11 +158,10 @@ impl Renderer {
         }
     }
 
-    pub fn has_renderpass(&self) -> bool {
-        self.render_pass.is_some()
-    }
-
-    fn create_pipeline(gfx_queue: Arc<Queue>) -> Arc<GraphicsPipeline> {
+    fn create_pipeline(
+        subpass: PipelineSubpassType,
+        gfx_queue: Arc<Queue>,
+    ) -> Arc<GraphicsPipeline> {
         let vs = vs::load(gfx_queue.device().clone())
             .expect("failed to create shader module")
             .entry_point("main")
@@ -216,6 +214,7 @@ impl Renderer {
                 dynamic_state: [DynamicState::Viewport, DynamicState::Scissor]
                     .into_iter()
                     .collect(),
+                subpass: Some(subpass),
                 ..GraphicsPipelineCreateInfo::layout(layout)
             },
         )
