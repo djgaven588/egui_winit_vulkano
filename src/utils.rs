@@ -21,7 +21,10 @@ use vulkano::{
     descriptor_set::allocator::StandardDescriptorSetAllocator,
     device::{Device, Queue},
     image::{view::ImageView, AllocateImageError, Image, ImageCreateInfo, ImageType, ImageUsage},
-    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
+    memory::allocator::{
+        AllocationCreateInfo, GenericMemoryAllocatorCreateInfo, MemoryTypeFilter,
+        StandardMemoryAllocator,
+    },
     Validated, ValidationError, VulkanError,
 };
 
@@ -48,9 +51,9 @@ pub fn immutable_texture_from_bytes(
     .map_err(ImageCreationError::Vulkan)?;
 
     let texture_data_buffer = Buffer::from_iter(
-        allocators.memory.clone(),
-        BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
-        AllocationCreateInfo {
+        &allocators.memory,
+        &BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
+        &AllocationCreateInfo {
             memory_type_filter: MemoryTypeFilter::PREFER_HOST
                 | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
             ..Default::default()
@@ -60,27 +63,24 @@ pub fn immutable_texture_from_bytes(
     .map_err(ImageCreationError::AllocateBuffer)?;
 
     let texture = Image::new(
-        allocators.memory.clone(),
-        ImageCreateInfo {
+        &allocators.memory,
+        &ImageCreateInfo {
             image_type: ImageType::Dim2d,
             format,
             extent: [dimensions[0], dimensions[1], 1],
             usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
             ..Default::default()
         },
-        AllocationCreateInfo::default(),
+        &AllocationCreateInfo::default(),
     )
     .map_err(ImageCreationError::AllocateImage)?;
 
-    cbb.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
-        texture_data_buffer,
-        texture.clone(),
-    ))
-    .map_err(ImageCreationError::Validation)?;
+    cbb.copy_buffer_to_image(CopyBufferToImageInfo::new(texture_data_buffer, texture.clone()))
+        .map_err(ImageCreationError::Validation)?;
 
     let _fut = cbb.build().unwrap().execute(queue).unwrap();
 
-    Ok(ImageView::new_default(texture).unwrap())
+    Ok(ImageView::new_default(&texture).unwrap())
 }
 
 #[cfg(feature = "image")]
@@ -121,12 +121,15 @@ pub struct Allocators {
 impl Allocators {
     pub fn new_default(device: &Arc<Device>) -> Self {
         Self {
-            memory: Arc::new(StandardMemoryAllocator::new_default(device.clone())),
-            descriptor_set: StandardDescriptorSetAllocator::new(device.clone(), Default::default())
-                .into(),
+            memory: Arc::new(StandardMemoryAllocator::new(
+                device,
+                &GenericMemoryAllocatorCreateInfo::default(),
+            )),
+            descriptor_set: StandardDescriptorSetAllocator::new(device, &Default::default()).into(),
             command_buffer: StandardCommandBufferAllocator::new(
-                device.clone(),
-                StandardCommandBufferAllocatorCreateInfo {
+                device,
+                &StandardCommandBufferAllocatorCreateInfo {
+                    primary_buffer_count: 32,
                     secondary_buffer_count: 32,
                     ..Default::default()
                 },

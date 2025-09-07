@@ -21,8 +21,8 @@ use vulkano::{
         CommandBufferLevel, CommandBufferUsage, CopyBufferToImageInfo, RecordingCommandBuffer,
     },
     descriptor_set::{
-        allocator::StandardDescriptorSetAllocator, layout::DescriptorSetLayout, DescriptorSet,
-        WriteDescriptorSet,
+        allocator::StandardDescriptorSetAllocator, layout::DescriptorSetLayout,
+        DescriptorImageInfo, DescriptorSet, WriteDescriptorSet,
     },
     device::Queue,
     format::{Format, NumericFormat},
@@ -54,7 +54,6 @@ use vulkano::{
             viewport::{Scissor, Viewport, ViewportState},
             GraphicsPipelineCreateInfo,
         },
-        layout::PipelineDescriptorSetLayoutCreateInfo,
         DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
         PipelineShaderStageCreateInfo,
     },
@@ -124,8 +123,8 @@ impl Renderer {
             final_output_format.numeric_format_color().unwrap() == NumericFormat::SRGB;
         let allocators = Allocators::new_default(gfx_queue.device());
         let vertex_index_buffer_pool = SubbufferAllocator::new(
-            allocators.memory.clone(),
-            SubbufferAllocatorCreateInfo {
+            &allocators.memory,
+            &SubbufferAllocatorCreateInfo {
                 arena_size: INDEX_BUFFER_SIZE + VERTEX_BUFFER_SIZE,
                 buffer_usage: BufferUsage::INDEX_BUFFER | BufferUsage::VERTEX_BUFFER,
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
@@ -133,10 +132,10 @@ impl Renderer {
                 ..Default::default()
             },
         );
-        let pipeline = Self::create_pipeline(subpass.clone(), gfx_queue.clone());
+        let pipeline = Self::create_pipeline(subpass, gfx_queue.clone());
         let font_sampler = Sampler::new(
-            gfx_queue.device().clone(),
-            SamplerCreateInfo {
+            gfx_queue.device(),
+            &SamplerCreateInfo {
                 mag_filter: Filter::Linear,
                 min_filter: Filter::Linear,
                 address_mode: [SamplerAddressMode::ClampToEdge; 3],
@@ -165,11 +164,11 @@ impl Renderer {
         subpass: PipelineSubpassType,
         gfx_queue: Arc<Queue>,
     ) -> Arc<GraphicsPipeline> {
-        let vs = vs::load(gfx_queue.device().clone())
+        let vs = vs::load(gfx_queue.device())
             .expect("failed to create shader module")
             .entry_point("main")
             .unwrap();
-        let fs = fs::load(gfx_queue.device().clone())
+        let fs = fs::load(gfx_queue.device())
             .expect("failed to create shader module")
             .entry_point("main")
             .unwrap();
@@ -179,46 +178,35 @@ impl Renderer {
         blend.src_alpha_blend_factor = BlendFactor::OneMinusDstAlpha;
         blend.dst_alpha_blend_factor = BlendFactor::One;
         let blend_state = ColorBlendState {
-            attachments: vec![ColorBlendAttachmentState {
-                blend: Some(blend),
-                ..Default::default()
-            }],
+            attachments: &[ColorBlendAttachmentState { blend: Some(blend), ..Default::default() }],
             ..ColorBlendState::default()
         };
 
         let vertex_input_state = Some(EguiVertex::per_vertex().definition(&vs).unwrap());
 
         let stages =
-            [PipelineShaderStageCreateInfo::new(vs), PipelineShaderStageCreateInfo::new(fs)];
+            [PipelineShaderStageCreateInfo::new(&vs), PipelineShaderStageCreateInfo::new(&fs)];
 
-        let layout = PipelineLayout::new(
-            gfx_queue.device().clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                .into_pipeline_layout_create_info(gfx_queue.device().clone())
-                .unwrap(),
-        )
-        .unwrap();
+        let layout = PipelineLayout::from_stages(gfx_queue.device(), &stages).unwrap();
 
         GraphicsPipeline::new(
-            gfx_queue.device().clone(),
+            gfx_queue.device(),
             None,
-            GraphicsPipelineCreateInfo {
-                stages: stages.into_iter().collect(),
-                vertex_input_state,
-                input_assembly_state: Some(InputAssemblyState::default()),
-                viewport_state: Some(ViewportState::default()),
-                rasterization_state: Some(RasterizationState::default()),
-                multisample_state: Some(MultisampleState {
+            &GraphicsPipelineCreateInfo {
+                stages: &stages,
+                vertex_input_state: vertex_input_state.as_ref(),
+                input_assembly_state: Some(&InputAssemblyState::default()),
+                viewport_state: Some(&ViewportState::default()),
+                rasterization_state: Some(&RasterizationState::default()),
+                multisample_state: Some(&MultisampleState {
                     rasterization_samples: SampleCount::Sample1,
                     ..Default::default()
                 }),
-                color_blend_state: Some(blend_state),
+                color_blend_state: Some(&blend_state),
                 depth_stencil_state: None,
-                dynamic_state: [DynamicState::Viewport, DynamicState::Scissor]
-                    .into_iter()
-                    .collect(),
+                dynamic_state: &[DynamicState::Viewport, DynamicState::Scissor],
                 subpass: Some(subpass),
-                ..GraphicsPipelineCreateInfo::layout(layout)
+                ..GraphicsPipelineCreateInfo::new(&layout)
             },
         )
         .unwrap()
@@ -234,7 +222,14 @@ impl Renderer {
         DescriptorSet::new(
             self.allocators.descriptor_set.clone(),
             layout.clone(),
-            [WriteDescriptorSet::image_view_sampler(0, image, sampler)],
+            [WriteDescriptorSet::image(
+                0,
+                DescriptorImageInfo {
+                    image_view: Some(image),
+                    sampler: Some(sampler),
+                    image_layout: ImageLayout::Undefined,
+                },
+            )],
             [],
         )
         .unwrap()
@@ -247,7 +242,7 @@ impl Renderer {
         sampler_create_info: SamplerCreateInfo,
     ) -> egui::TextureId {
         let layout = self.pipeline.layout().set_layouts().first().unwrap();
-        let sampler = Sampler::new(self.gfx_queue.device().clone(), sampler_create_info).unwrap();
+        let sampler = Sampler::new(self.gfx_queue.device(), &sampler_create_info).unwrap();
         let desc_set = self.sampled_image_desc_set(layout, image.clone(), sampler);
         let id = egui::TextureId::User(self.next_native_tex_id);
         self.next_native_tex_id += 1;
@@ -272,7 +267,7 @@ impl Renderer {
         let is_supported = |device: &vulkano::device::Device, format: Format| {
             device
                 .physical_device()
-                .image_format_properties(vulkano::image::ImageFormatInfo {
+                .image_format_properties(&vulkano::image::ImageFormatInfo {
                     format,
                     usage: ImageUsage::SAMPLED
                         | ImageUsage::TRANSFER_DST
@@ -341,10 +336,10 @@ impl Renderer {
         mapped_stage: &mut [u8],
     ) {
         let mut upload_command = RecordingCommandBuffer::new(
-            self.allocators.command_buffer.clone(),
+            &self.allocators.command_buffer,
             self.gfx_queue.queue_family_index(),
             CommandBufferLevel::Primary,
-            CommandBufferBeginInfo {
+            &CommandBufferBeginInfo {
                 usage: CommandBufferUsage::OneTimeSubmit,
                 ..Default::default()
             },
@@ -392,10 +387,12 @@ impl Renderer {
                             new_layout: ImageLayout::TransferDstOptimal,
                             subresource_range: ImageSubresourceRange {
                                 aspects: ImageAspects::COLOR,
-                                mip_levels: 0..1,
-                                array_layers: 0..1,
+                                base_mip_level: 0,
+                                level_count: 1,
+                                base_array_layer: 0,
+                                layer_count: 1,
                             },
-                            ..ImageMemoryBarrier::image(existing_image.image().clone())
+                            ..ImageMemoryBarrier::new(existing_image.image().clone())
                         }]
                         .into(),
                         ..Default::default()
@@ -416,12 +413,13 @@ impl Renderer {
                             image_subresource: ImageSubresourceLayers {
                                 aspects: ImageAspects::COLOR,
                                 mip_level: 0,
-                                array_layers: 0..1,
+                                base_array_layer: 0,
+                                layer_count: 1,
                             },
                             ..Default::default()
                         }]
                         .into(),
-                        ..CopyBufferToImageInfo::buffer_image(stage, existing_image.image().clone())
+                        ..CopyBufferToImageInfo::new(stage, existing_image.image().clone())
                     })
                     .unwrap();
 
@@ -437,10 +435,12 @@ impl Renderer {
                             new_layout: ImageLayout::ShaderReadOnlyOptimal,
                             subresource_range: ImageSubresourceRange {
                                 aspects: ImageAspects::COLOR,
-                                mip_levels: 0..existing_image.image().mip_levels(),
-                                array_layers: 0..existing_image.image().array_layers(),
+                                base_mip_level: 0,
+                                level_count: existing_image.image().mip_levels(),
+                                base_array_layer: 0,
+                                layer_count: existing_image.image().array_layers(),
                             },
-                            ..ImageMemoryBarrier::image(existing_image.image().clone())
+                            ..ImageMemoryBarrier::new(existing_image.image().clone())
                         }]
                         .into(),
                         ..Default::default()
@@ -452,8 +452,8 @@ impl Renderer {
             let img = {
                 let extent = [delta.image.width() as u32, delta.image.height() as u32, 1];
                 Image::new(
-                    self.allocators.memory.clone(),
-                    ImageCreateInfo {
+                    &self.allocators.memory,
+                    &ImageCreateInfo {
                         image_type: ImageType::Dim2d,
                         format,
                         extent,
@@ -461,7 +461,7 @@ impl Renderer {
                         initial_layout: ImageLayout::Undefined,
                         ..Default::default()
                     },
-                    AllocationCreateInfo::default(),
+                    &AllocationCreateInfo::default(),
                 )
                 .unwrap()
             };
@@ -479,10 +479,12 @@ impl Renderer {
                             new_layout: ImageLayout::TransferDstOptimal,
                             subresource_range: ImageSubresourceRange {
                                 aspects: ImageAspects::COLOR,
-                                mip_levels: 0..1,
-                                array_layers: 0..1,
+                                base_mip_level: 0,
+                                level_count: 1,
+                                base_array_layer: 0,
+                                layer_count: 1,
                             },
-                            ..ImageMemoryBarrier::image(img.clone())
+                            ..ImageMemoryBarrier::new(img.clone())
                         }]
                         .into(),
                         ..Default::default()
@@ -490,7 +492,7 @@ impl Renderer {
                     .unwrap();
 
                 upload_command
-                    .copy_buffer_to_image(&CopyBufferToImageInfo::buffer_image(stage, img.clone()))
+                    .copy_buffer_to_image(&CopyBufferToImageInfo::new(stage, img.clone()))
                     .unwrap();
 
                 // Finalize
@@ -505,10 +507,12 @@ impl Renderer {
                             new_layout: ImageLayout::ShaderReadOnlyOptimal,
                             subresource_range: ImageSubresourceRange {
                                 aspects: ImageAspects::COLOR,
-                                mip_levels: 0..img.mip_levels(),
-                                array_layers: 0..img.array_layers(),
+                                base_mip_level: 0,
+                                level_count: img.mip_levels(),
+                                base_array_layer: 0,
+                                layer_count: img.array_layers(),
                             },
-                            ..ImageMemoryBarrier::image(img.clone())
+                            ..ImageMemoryBarrier::new(img.clone())
                         }]
                         .into(),
                         ..Default::default()
@@ -527,8 +531,8 @@ impl Renderer {
                 _ => ComponentMapping::identity(),
             };
             let view = ImageView::new(
-                img.clone(),
-                ImageViewCreateInfo { component_mapping, ..ImageViewCreateInfo::from_image(&img) },
+                &img,
+                &ImageViewCreateInfo { component_mapping, ..ImageViewCreateInfo::from_image(&img) },
             )
             .unwrap();
             // Create a descriptor for it
@@ -550,8 +554,7 @@ impl Renderer {
         // Dafuq Ash doing?
         submit_info.wait_semaphore_count = 0;
 
-        let fence =
-            Fence::new(self.gfx_queue.device().clone(), FenceCreateInfo::default()).unwrap();
+        let fence = Fence::new(self.gfx_queue.device(), &FenceCreateInfo::default()).unwrap();
 
         // Execute
         self.gfx_queue.with(|mut _guard| unsafe {
@@ -583,9 +586,9 @@ impl Renderer {
             return;
         };
         let buffer = Buffer::new(
-            self.allocators.memory.clone(),
-            BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
-            AllocationCreateInfo {
+            &self.allocators.memory,
+            &BufferCreateInfo { usage: BufferUsage::TRANSFER_SRC, ..Default::default() },
+            &AllocationCreateInfo {
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
@@ -801,7 +804,8 @@ impl Renderer {
                                             framebuffer_dimensions[0] as f32,
                                             framebuffer_dimensions[1] as f32,
                                         ],
-                                        depth_range: 0.0..=1.0,
+                                        min_depth: 0.0,
+                                        max_depth: 1.0,
                                     }],
                                 )
                                 .unwrap()
@@ -885,7 +889,8 @@ impl Renderer {
                                     &[Viewport {
                                         offset: [rect_min_x, rect_min_y],
                                         extent: [rect_max_x - rect_min_x, rect_max_y - rect_min_y],
-                                        depth_range: 0.0..=1.0,
+                                        min_depth: 0.0,
+                                        max_depth: 1.0,
                                     }],
                                 )
                                 .unwrap()
@@ -922,7 +927,7 @@ impl Renderer {
         }
     }
 
-    pub fn render_resources(&self) -> RenderResources {
+    pub fn render_resources(&'_ self) -> RenderResources<'_> {
         RenderResources {
             queue: self.queue(),
             memory_allocator: self.allocators.memory.clone(),
