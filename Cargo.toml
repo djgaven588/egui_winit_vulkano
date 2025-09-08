@@ -24,11 +24,11 @@ egui-winit = { version = "0.31", default-features = false }
 egui = "0.31"
 image = { version = "0.25", optional = true }
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
-vulkano = { git = "https://github.com/djgaven588/vulkano.git", rev = "91cebd25cfde7a96e898479e1c734012907eed67" }
+vulkano = { git = "https://github.com/djgaven588/vulkano.git", rev = "f40285b66546921c41c87fa4828d360e62e8dbf2" }
 ash = "0.38.0"
-vulkano-shaders = { git = "https://github.com/djgaven588/vulkano.git", rev = "91cebd25cfde7a96e898479e1c734012907eed67" }
+vulkano-shaders = { git = "https://github.com/djgaven588/vulkano.git", rev = "f40285b66546921c41c87fa4828d360e62e8dbf2" }
 
 [dev-dependencies]
 cgmath = "0.18.0"
 egui_demo_lib = "0.31.0"
-vulkano-util = { git = "https://github.com/djgaven588/vulkano.git", rev = "91cebd25cfde7a96e898479e1c734012907eed67" }
+vulkano-util = { git = "https://github.com/djgaven588/vulkano.git", rev = "f40285b66546921c41c87fa4828d360e62e8dbf2" }
