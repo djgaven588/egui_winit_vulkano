@@ -286,23 +286,22 @@ impl Renderer {
         }
     }
     /// Based on self.font_format, extract into bytes.
-    fn pack_font_data_into(&self, data: &egui::FontImage, into: &mut [u8]) {
+    fn pack_font_data_into(&self, data: &egui::ColorImage, into: &mut [u8]) {
         match self.font_format {
             Format::R8G8_UNORM => {
                 // Egui expects RGB to be linear in shader, but alpha to be *nonlinear.*
                 // Thus, we use R channel for linear coverage, G for the same coverage converted to nonlinear.
                 // Then gets swizzled up to RRRG to match expected values.
-                let linear =
-                    data.pixels.iter().map(|f| (f.clamp(0.0, 1.0 - f32::EPSILON) * 256.0) as u8);
-                let bytes = linear
-                    .zip(data.srgba_pixels(None))
-                    .flat_map(|(linear, srgb)| [linear, srgb.a()]);
+                let linear = data.pixels.iter();
+                let bytes = linear.zip(data.pixels.iter()).flat_map(|(linear, srgb)| {
+                    [linear.r(), linear.r(), linear.r(), srgb.to_srgba_unmultiplied()[3]]
+                });
 
                 into.iter_mut().zip(bytes).for_each(|(into, from)| *into = from);
             }
             Format::R8G8B8A8_SRGB => {
                 // No special tricks, pack them directly.
-                let bytes = data.srgba_pixels(None).flat_map(|color| color.to_array());
+                let bytes = data.pixels.iter().flat_map(|color| color.to_array());
                 into.iter_mut().zip(bytes).for_each(|(into, from)| *into = from);
             }
             // This is the exhaustive list of choosable font formats.
@@ -313,11 +312,8 @@ impl Renderer {
         match &delta.image {
             egui::ImageData::Color(c) => {
                 // Always four bytes per pixel for sRGBA
-                c.width() * c.height() * 4
-            }
-            egui::ImageData::Font(f) => {
-                f.width()
-                    * f.height()
+                c.width()
+                    * c.height()
                     * match self.font_format {
                         Format::R8G8_UNORM => 2,
                         Format::R8G8B8A8_SRGB => 4,
@@ -354,11 +350,6 @@ impl Renderer {
                     image.pixels.len(),
                     "Mismatch between texture size and texel count"
                 );
-                let bytes = image.pixels.iter().flat_map(|color| color.to_array());
-                mapped_stage.iter_mut().zip(bytes).for_each(|(into, from)| *into = from);
-                Format::R8G8B8A8_SRGB
-            }
-            egui::ImageData::Font(image) => {
                 // Dynamically pack based on chosen format
                 self.pack_font_data_into(image, mapped_stage);
                 self.font_format
