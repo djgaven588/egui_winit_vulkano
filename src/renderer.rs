@@ -292,10 +292,7 @@ impl Renderer {
                 // Egui expects RGB to be linear in shader, but alpha to be *nonlinear.*
                 // Thus, we use R channel for linear coverage, G for the same coverage converted to nonlinear.
                 // Then gets swizzled up to RRRG to match expected values.
-                let linear = data.pixels.iter();
-                let bytes = linear.zip(data.pixels.iter()).flat_map(|(linear, srgb)| {
-                    [linear.r(), linear.r(), linear.r(), srgb.to_srgba_unmultiplied()[3]]
-                });
+                let bytes = data.pixels.iter().flat_map(|linear| [linear.r(), linear.a()]);
 
                 into.iter_mut().zip(bytes).for_each(|(into, from)| *into = from);
             }
